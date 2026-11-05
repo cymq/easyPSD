@@ -5,10 +5,12 @@ edition = "2024"
 rust-version = "1.97"
 
 [dependencies]
-eframe = "0.27"
-egui = "0.27"
+slint = "1.10"
 lcms2 = { version = "6.0", features = ["static"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "tiff"] }
 rfd = "0.14"
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
 apeireth-image-algo = "=2.0.0-rc.5"
+
+[build-dependencies]
+slint-build = "1.10"

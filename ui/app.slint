@@ -1,0 +1,868 @@
+import { ScrollView } from "std-widgets.slint";
+import "../GenInterfaceJP-Regular.ttf";
+
+global Theme {
+    out property <color> logo: #4169E1;
+    out property <color> text: #1F2937;
+    out property <color> weak-text: #6B7280;
+    out property <color> border: #E5E7EB;
+    out property <color> inactive-bg: #F3F4F6;
+    out property <color> inactive-text: #4B5563;
+    out property <color> hover-bg: #EBF2FF;
+    out property <color> surface: #FFFFFF;
+    out property <color> panel-bg: #F5F6F8;
+    out property <color> field-bg: #FAFAFC;
+}
+
+component Card inherits Rectangle {
+    background: Theme.surface;
+    border-color: Theme.border;
+    border-width: 1px;
+    border-radius: 6px;
+}
+
+component Pane inherits Rectangle {
+    min-width: 0px;
+    preferred-width: 0px;
+    background: Theme.surface;
+    border-color: Theme.border;
+    border-width: 1px;
+    border-radius: 8px;
+}
+
+component CheckBoxRow inherits Rectangle {
+    in-out property <bool> checked: false;
+    in property <string> text: "";
+    in property <length> font-size: 11.5px;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+
+    height: 22px;
+    horizontal-stretch: 0;
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: center;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                background: root.checked ? Theme.logo : (ta.has-hover && root.enabled ? Theme.hover-bg : Theme.inactive-bg);
+                border-width: 1px;
+                border-color: root.checked || (ta.has-hover && root.enabled) ? Theme.logo : Theme.border;
+
+                if root.checked : Text {
+                    text: "✓";
+                    color: Theme.surface;
+                    font-size: 11px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Text {
+            text: root.text;
+            font-size: root.font-size;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+component ActionButton inherits Rectangle {
+    in property <string> text: "";
+    in property <length> font-size: 11.5px;
+    in property <bool> font-bold: false;
+    in property <bool> enabled: true;
+    in property <bool> selected: false;
+    in property <bool> primary: false;
+    callback clicked();
+
+    min-width: 0px;
+    preferred-width: 0px;
+    border-radius: 6px;
+    border-width: 1px;
+    opacity: root.enabled ? 1.0 : 0.55;
+
+    background: !root.enabled
+        ? Theme.inactive-bg
+        : (root.primary || root.selected)
+            ? Theme.logo
+            : ta.pressed
+                ? Theme.logo
+                : ta.has-hover
+                    ? Theme.hover-bg
+                    : Theme.inactive-bg;
+
+    border-color: !root.enabled
+        ? Theme.border
+        : (root.primary || root.selected || ta.has-hover || ta.pressed)
+            ? Theme.logo
+            : Theme.border;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.text;
+        font-size: root.font-size;
+        font-weight: root.font-bold ? 700 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        color: !root.enabled
+            ? Theme.inactive-text
+            : (root.primary || root.selected || ta.pressed)
+                ? Theme.surface
+                : ta.has-hover
+                    ? Theme.logo
+                    : Theme.inactive-text;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component FileSelectRow inherits HorizontalLayout {
+    in property <string> display-text: "";
+    in property <bool> has-value: false;
+    in property <bool> enabled: true;
+    callback select-clicked();
+
+    spacing: 6px;
+    height: 26px;
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    Rectangle {
+        horizontal-stretch: 1;
+        height: 26px;
+        background: Theme.field-bg;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: 4px;
+        clip: true;
+
+        HorizontalLayout {
+            padding-left: 6px;
+            padding-right: 6px;
+            Text {
+                text: root.display-text;
+                font-size: 11px;
+                color: root.has-value ? Theme.text : Theme.weak-text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    ActionButton {
+        width: 64px;
+        height: 26px;
+        text: "選択...";
+        font-size: 11.5px;
+        enabled: root.enabled;
+        clicked => {
+            root.select-clicked();
+        }
+    }
+}
+
+component AdjustmentRow inherits HorizontalLayout {
+    in property <string> label: "";
+    in-out property <int> value: 0;
+    in property <int> minimum: -100;
+    in property <int> maximum: 100;
+    in property <string> suffix: "";
+    in property <bool> enabled: true;
+
+    callback value-dragging(int);
+    callback value-committed(int);
+
+    spacing: 6px;
+    height: 22px;
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    property <float> normalized: clamp(
+        (root.value - root.minimum) / (root.maximum - root.minimum),
+        0.0,
+        1.0
+    );
+
+    // 1. Fixed-width label (double-click resets to 0)
+    Rectangle {
+        width: 74px;
+        height: 22px;
+
+        Text {
+            width: 100%;
+            height: 100%;
+            text: root.label;
+            font-size: 11px;
+            font-weight: root.value != 0 ? 700 : 400;
+            color: root.value != 0 ? Theme.logo : Theme.text;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+        }
+
+        TouchArea {
+            enabled: root.enabled;
+            double-clicked => {
+                if (root.value != 0) {
+                    root.value = 0;
+                    root.value-committed(0);
+                }
+            }
+        }
+    }
+
+    // 2. Slider rail (drag updates live; release commits all intents; double-click resets to 0)
+    slider-container := Rectangle {
+        horizontal-stretch: 1;
+        height: 22px;
+
+        property <length> thumb-size: 14px;
+        property <length> usable-width: max(self.width - self.thumb-size, 1px);
+
+        // Background track
+        Rectangle {
+            x: 0px;
+            y: (parent.height - 6px) / 2;
+            width: parent.width;
+            height: 6px;
+            border-radius: 3px;
+            background: Theme.inactive-bg;
+            border-width: 1px;
+            border-color: slider-ta.has-hover && root.enabled ? Theme.logo : Theme.border;
+        }
+
+        // Center zero marker
+        Rectangle {
+            x: parent.width / 2 - 0.5px;
+            y: (parent.height - 10px) / 2;
+            width: 1px;
+            height: 10px;
+            background: Theme.border;
+        }
+
+        // Thumb handle
+        Rectangle {
+            x: parent.usable-width * root.normalized;
+            y: (parent.height - parent.thumb-size) / 2;
+            width: parent.thumb-size;
+            height: parent.thumb-size;
+            border-radius: parent.thumb-size / 2;
+            background: root.value != 0 || slider-ta.pressed
+                ? Theme.logo
+                : (slider-ta.has-hover && root.enabled ? Theme.hover-bg : Theme.surface);
+            border-width: 1.5px;
+            border-color: Theme.logo;
+        }
+
+        slider-ta := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: root.enabled ? pointer : default;
+
+            function update-from-mouse(mx: length) {
+                let ratio = clamp((mx - parent.thumb-size / 2) / parent.usable-width, 0.0, 1.0);
+                let new-val = round(root.minimum + ratio * (root.maximum - root.minimum));
+                if (new-val != root.value) {
+                    root.value = new-val;
+                    root.value-dragging(new-val);
+                }
+            }
+
+            pointer-event(event) => {
+                if (!root.enabled) {
+                    return;
+                }
+                if (event.button == PointerEventButton.left) {
+                    if (event.kind == PointerEventKind.down) {
+                        self.update-from-mouse(self.mouse-x);
+                    } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                        root.value-committed(root.value);
+                    }
+                }
+            }
+
+            moved => {
+                if (self.pressed && root.enabled) {
+                    self.update-from-mouse(self.mouse-x);
+                }
+            }
+
+            double-clicked => {
+                if (root.value != 0) {
+                    root.value = 0;
+                    root.value-committed(0);
+                }
+            }
+        }
+    }
+
+    // 3. Fixed-width numeric DragValue / input box (horizontal drag or double-click reset)
+    val-box := Rectangle {
+        width: 54px;
+        height: 20px;
+        border-radius: 4px;
+        background: val-ta.has-hover && root.enabled ? Theme.hover-bg : Theme.field-bg;
+        border-width: 1px;
+        border-color: (val-ta.has-hover || val-ta.pressed) && root.enabled ? Theme.logo : Theme.border;
+
+        Text {
+            width: 100%;
+            height: 100%;
+            text: "\{root.value}\{root.suffix}";
+            font-size: 11px;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        val-ta := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: root.enabled ? ew-resize : default;
+
+            property <int> start-value: 0;
+
+            pointer-event(event) => {
+                if (!root.enabled) {
+                    return;
+                }
+                if (event.button == PointerEventButton.left) {
+                    if (event.kind == PointerEventKind.down) {
+                        self.start-value = root.value;
+                    } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                        root.value-committed(root.value);
+                    }
+                }
+            }
+
+            moved => {
+                if (self.pressed && root.enabled) {
+                    let delta = round((self.mouse-x - self.pressed-x) / 2px);
+                    let next = clamp(self.start-value + delta, root.minimum, root.maximum);
+                    if (next != root.value) {
+                        root.value = next;
+                        root.value-dragging(next);
+                    }
+                }
+            }
+
+            double-clicked => {
+                if (root.value != 0) {
+                    root.value = 0;
+                    root.value-committed(0);
+                }
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    in property <string> app-version: "0.2.0";
+    in-out property <bool> cmyk-enabled: true;
+    in-out property <bool> black-point-compensation: true;
+
+    in property <string> input-display: "画像ファイルが未選択です";
+    in property <bool> has-input: false;
+    in property <string> icc-display: "CMYKカラープロファイル (ICC) が未選択です";
+    in property <bool> has-icc: false;
+
+    in-out property <int> active-index: 1;
+    in property <bool> loading: false;
+
+    in property <bool> has-preview: false;
+    in property <image> original-preview;
+    in property <image> active-preview;
+
+    in-out property <int> hue: 0;
+    in-out property <int> saturation: 0;
+    in-out property <int> value: 0;
+    in-out property <int> contrast: 0;
+    in-out property <int> highlights: 0;
+    in-out property <int> shadows: 0;
+
+    callback toggle-cmyk(bool);
+    callback select-input-file();
+    callback select-icc-file();
+    callback toggle-bpc(bool);
+    callback select-intent(int);
+    callback adjustment-dragging();
+    callback adjustment-committed();
+    callback reset-adjustments();
+    callback export-psd();
+
+    pure function can-reset-adjustments() -> bool {
+        root.hue != 0 || root.saturation != 0 || root.value != 0 ||
+        root.contrast != 0 || root.highlights != 0 || root.shadows != 0
+    }
+
+    pure function can-export() -> bool {
+        !root.loading && root.has-input && (!root.cmyk-enabled || root.has-icc)
+    }
+
+    title: "easyPSD v" + root.app-version;
+    preferred-width: 1080px;
+    preferred-height: 740px;
+    min-width: 860px;
+    min-height: 560px;
+    background: Theme.panel-bg;
+    default-font-family: "Gen Interface JP";
+
+    VerticalLayout {
+        // =====================================================================
+        // 1. Header Panel
+        // =====================================================================
+        Rectangle {
+            height: 48px;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            HorizontalLayout {
+                padding-left: 24px;
+                padding-right: 24px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 8px;
+
+                Text {
+                    text: "easyPSD";
+                    font-size: 22px;
+                    font-weight: 700;
+                    color: Theme.logo;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "v" + root.app-version;
+                    font-size: 12px;
+                    color: Theme.weak-text;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                CheckBoxRow {
+                    checked <=> root.cmyk-enabled;
+                    text: "CMYKカラープロファイル変換を行う";
+                    font-size: 12px;
+                    enabled: !root.loading;
+                    toggled(val) => {
+                        root.toggle-cmyk(val);
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // 2. Main Two-Pane Workspace (7 : 3 Split)
+        // =====================================================================
+        HorizontalLayout {
+            vertical-stretch: 1;
+            padding: 12px;
+            spacing: 12px;
+
+            // -----------------------------------------------------------------
+            // Left Pane: Preview Viewport (70%)
+            // -----------------------------------------------------------------
+            Pane {
+                horizontal-stretch: 7;
+                vertical-stretch: 1;
+
+                if !root.cmyk-enabled : VerticalLayout {
+                    padding: 16px;
+                    alignment: center;
+
+                    Text {
+                        text: "CMYKカラープロファイル変換が「無効」になっています。\n\nこの設定では比較画面および画像調整は使用されません。";
+                        font-size: 13px;
+                        color: Theme.weak-text;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if root.cmyk-enabled : VerticalLayout {
+                    padding: 10px;
+                    spacing: root.has-preview ? 6px : 0px;
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: Theme.field-bg;
+                        border-color: Theme.border;
+                        border-width: 1px;
+                        border-radius: 6px;
+                        clip: true;
+
+                        if root.has-preview : Rectangle {
+                            width: 100%;
+                            height: 100%;
+
+                            Image {
+                                x: 4px;
+                                y: 4px;
+                                width: parent.width - 8px;
+                                height: parent.height - 8px;
+                                image-fit: contain;
+                                source: (root.active-index == 0 || preview-touch.pressed)
+                                    ? root.original-preview
+                                    : root.active-preview;
+                            }
+
+                            preview-touch := TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                mouse-cursor: pointer;
+                            }
+                        }
+
+                        if !root.has-preview : VerticalLayout {
+                            padding: 16px;
+                            alignment: center;
+
+                            Text {
+                                text: "画像とCMYKプロファイルを選択すると\n自動的にプレビューが表示されます";
+                                font-size: 13px;
+                                color: Theme.weak-text;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    if root.has-preview : Rectangle {
+                        height: 20px;
+                        Text {
+                            width: 100%;
+                            height: 100%;
+                            text: "長押しで元画像を表示";
+                            font-size: 10.5px;
+                            color: Theme.weak-text;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // Right Pane: Settings Sidebar (30%)
+            // -----------------------------------------------------------------
+            Pane {
+                horizontal-stretch: 3;
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 10px;
+
+                    // Upper Scrollable Settings Area
+                    ScrollView {
+                        vertical-stretch: 1;
+                        horizontal-scrollbar-policy: always-off;
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            alignment: start;
+
+                            // -------------------------------------------------
+                            // Card 1: Configuration Fields
+                            // -------------------------------------------------
+                            Card {
+                                VerticalLayout {
+                                    padding: 8px;
+                                    spacing: 8px;
+
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text {
+                                            text: "変換元画像:";
+                                            font-size: 11.5px;
+                                            color: Theme.text;
+                                        }
+                                        FileSelectRow {
+                                            display-text: root.input-display;
+                                            has-value: root.has-input;
+                                            enabled: !root.loading;
+                                            select-clicked => {
+                                                root.select-input-file();
+                                            }
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        opacity: root.cmyk-enabled ? 1.0 : 0.5;
+                                        Text {
+                                            text: "カラー設定:";
+                                            font-size: 11.5px;
+                                            color: Theme.text;
+                                        }
+                                        FileSelectRow {
+                                            display-text: root.icc-display;
+                                            has-value: root.has-icc;
+                                            enabled: root.cmyk-enabled && !root.loading;
+                                            select-clicked => {
+                                                root.select-icc-file();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // -------------------------------------------------
+                            // Card 2: Intent Selection Panel
+                            // -------------------------------------------------
+                            Card {
+                                opacity: (root.cmyk-enabled && !root.loading) ? 1.0 : 0.5;
+
+                                VerticalLayout {
+                                    padding: 8px;
+                                    spacing: 6px;
+
+                                    HorizontalLayout {
+                                        Text {
+                                            text: "変換方法を選択:";
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            color: Theme.text;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                        }
+                                        CheckBoxRow {
+                                            checked <=> root.black-point-compensation;
+                                            text: "黒点補正を使用";
+                                            font-size: 11px;
+                                            enabled: root.cmyk-enabled && !root.loading;
+                                            toggled(val) => {
+                                                root.toggle-bpc(val);
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        ActionButton {
+                                            horizontal-stretch: 1;
+                                            height: 30px;
+                                            text: "知覚的";
+                                            selected: root.active-index == 1;
+                                            enabled: root.cmyk-enabled && !root.loading;
+                                            clicked => {
+                                                root.active-index = 1;
+                                                root.select-intent(1);
+                                            }
+                                        }
+                                        ActionButton {
+                                            horizontal-stretch: 1;
+                                            height: 30px;
+                                            text: "相対的";
+                                            selected: root.active-index == 2;
+                                            enabled: root.cmyk-enabled && !root.loading;
+                                            clicked => {
+                                                root.active-index = 2;
+                                                root.select-intent(2);
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        ActionButton {
+                                            horizontal-stretch: 1;
+                                            height: 30px;
+                                            text: "彩度";
+                                            selected: root.active-index == 3;
+                                            enabled: root.cmyk-enabled && !root.loading;
+                                            clicked => {
+                                                root.active-index = 3;
+                                                root.select-intent(3);
+                                            }
+                                        }
+                                        ActionButton {
+                                            horizontal-stretch: 1;
+                                            height: 30px;
+                                            text: "絶対的";
+                                            selected: root.active-index == 4;
+                                            enabled: root.cmyk-enabled && !root.loading;
+                                            clicked => {
+                                                root.active-index = 4;
+                                                root.select-intent(4);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // -------------------------------------------------
+                            // Card 3: Image Adjustments Panel
+                            // -------------------------------------------------
+                            Card {
+                                opacity: (root.cmyk-enabled && !root.loading) ? 1.0 : 0.5;
+
+                                VerticalLayout {
+                                    padding: 8px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        Text {
+                                            text: "画像調整:";
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            color: Theme.text;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                        }
+                                        ActionButton {
+                                            width: 58px;
+                                            height: 20px;
+                                            text: "リセット";
+                                            font-size: 10.5px;
+                                            enabled: root.cmyk-enabled && !root.loading && root.can-reset-adjustments();
+                                            clicked => {
+                                                root.hue = 0;
+                                                root.saturation = 0;
+                                                root.value = 0;
+                                                root.contrast = 0;
+                                                root.highlights = 0;
+                                                root.shadows = 0;
+                                                root.reset-adjustments();
+                                            }
+                                        }
+                                    }
+
+                                    AdjustmentRow {
+                                        label: "色相";
+                                        value <=> root.hue;
+                                        minimum: -90;
+                                        maximum: 90;
+                                        suffix: "°";
+                                        enabled: root.cmyk-enabled && !root.loading;
+                                        value-dragging(_) => { root.adjustment-dragging(); }
+                                        value-committed(_) => { root.adjustment-committed(); }
+                                    }
+
+                                    AdjustmentRow {
+                                        label: "彩度";
+                                        value <=> root.saturation;
+                                        minimum: -100;
+                                        maximum: 100;
+                                        enabled: root.cmyk-enabled && !root.loading;
+                                        value-dragging(_) => { root.adjustment-dragging(); }
+                                        value-committed(_) => { root.adjustment-committed(); }
+                                    }
+
+                                    AdjustmentRow {
+                                        label: "明度";
+                                        value <=> root.value;
+                                        minimum: -100;
+                                        maximum: 100;
+                                        enabled: root.cmyk-enabled && !root.loading;
+                                        value-dragging(_) => { root.adjustment-dragging(); }
+                                        value-committed(_) => { root.adjustment-committed(); }
+                                    }
+
+                                    Rectangle {
+                                        height: 5px;
+                                        Rectangle {
+                                            y: 2px;
+                                            height: 1px;
+                                            width: 100%;
+                                            background: Theme.border;
+                                        }
+                                    }
+
+                                    AdjustmentRow {
+                                        label: "コントラスト";
+                                        value <=> root.contrast;
+                                        minimum: -100;
+                                        maximum: 100;
+                                        enabled: root.cmyk-enabled && !root.loading;
+                                        value-dragging(_) => { root.adjustment-dragging(); }
+                                        value-committed(_) => { root.adjustment-committed(); }
+                                    }
+
+                                    AdjustmentRow {
+                                        label: "ハイライト";
+                                        value <=> root.highlights;
+                                        minimum: -100;
+                                        maximum: 100;
+                                        enabled: root.cmyk-enabled && !root.loading;
+                                        value-dragging(_) => { root.adjustment-dragging(); }
+                                        value-committed(_) => { root.adjustment-committed(); }
+                                    }
+
+                                    AdjustmentRow {
+                                        label: "シャドウ";
+                                        value <=> root.shadows;
+                                        minimum: -100;
+                                        maximum: 100;
+                                        enabled: root.cmyk-enabled && !root.loading;
+                                        value-dragging(_) => { root.adjustment-dragging(); }
+                                        value-committed(_) => { root.adjustment-committed(); }
+                                    }
+
+                                    Text {
+                                        text: "項目名またはスライダーのダブルクリックで 0 に戻せます。";
+                                        font-size: 10px;
+                                        color: Theme.weak-text;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------------------------------------------------------
+                    // Bottom Pinned Element: Card 4 (Execution Block)
+                    // ---------------------------------------------------------
+                    Card {
+                        height: 52px;
+
+                        VerticalLayout {
+                            padding: 8px;
+
+                            ActionButton {
+                                height: 36px;
+                                text: "PSDを出力";
+                                font-size: 12.5px;
+                                font-bold: true;
+                                primary: true;
+                                enabled: root.can-export();
+                                clicked => {
+                                    root.export-psd();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
