@@ -1,7 +1,7 @@
 //! Pre-CMYK sRGB image adjustment engine (local Shadows/Highlights, midtone contrast, and HSV).
 
 use apeireth_image_algo::tone::{ShadowsHighlights, shadows_highlights};
-use palette::{Darken, Desaturate, FromColor, Hsv, Lighten, ShiftHue, Srgb};
+use palette::{Desaturate, FromColor, Hsv, ShiftHue, Srgb};
 
 /// User-configurable image adjustment parameters applied in sRGB space
 /// immediately prior to ICC CMYK conversion.
@@ -63,6 +63,7 @@ const REFERENCE_IMAGE_LONG_EDGE: f32 = 1600.0;
 const REFERENCE_TONE_RADIUS: f32 = 30.0;
 const SATURATION_EPSILON: f32 = 1e-6;
 const MAX_SATURATION_BOOST_GAIN: f32 = 2.0;
+const MAX_VALUE_CURVE_GAIN: f32 = 3.0;
 
 /// Smoothly boosts HSV saturation `s` in `[0.0, 1.0]` by `amount` in `[0.0, 1.0]`
 /// using a Schlick rational curve: `S' = ((1 + k) * S) / (1 + k * S)` where `k = 2 * amount`.
@@ -74,6 +75,27 @@ const MAX_SATURATION_BOOST_GAIN: f32 = 2.0;
 fn boost_hsv_saturation(s: f32, amount: f32) -> f32 {
     let k = MAX_SATURATION_BOOST_GAIN * amount.clamp(0.0, 1.0);
     ((1.0 + k) * s / (1.0 + k * s)).clamp(0.0, 1.0)
+}
+
+/// Applies a symmetric Schlick rational tone curve to HSV value `v` in `[0.0, 1.0]`
+/// for `amount` in `[-1.0, 1.0]`:
+/// - For `amount > 0`: `V' = ((1 + k) * V) / (1 + k * V)`
+/// - For `amount < 0`: `V' = V / (1 + k * (1 - V))`
+///
+/// This preserves pure black (`V = 0.0`) and pure paper white (`V = 1.0`) as fixed endpoints
+/// so lowering brightness does not muddy white backgrounds into gray ink.
+#[inline]
+fn adjust_hsv_value(v: f32, amount: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    if amount > 0.0 {
+        let k = MAX_VALUE_CURVE_GAIN * amount.clamp(0.0, 1.0);
+        ((1.0 + k) * v / (1.0 + k * v)).clamp(0.0, 1.0)
+    } else if amount < 0.0 {
+        let k = MAX_VALUE_CURVE_GAIN * (-amount).clamp(0.0, 1.0);
+        (v / (1.0 + k * (1.0 - v))).clamp(0.0, 1.0)
+    } else {
+        v
+    }
 }
 
 /// Applies local Shadows/Highlights and midtone contrast, followed by HSV
@@ -153,10 +175,8 @@ pub fn apply_adjustments(
             } else if saturation < 0.0 {
                 hsv = hsv.desaturate(-saturation);
             }
-            if value > 0.0 {
-                hsv = hsv.lighten(value);
-            } else if value < 0.0 {
-                hsv = hsv.darken(-value);
+            if params.value != 0 {
+                hsv.value = adjust_hsv_value(hsv.value, value);
             }
             rgb = Srgb::from_color(hsv);
         }
@@ -564,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_value_moves_brightness_in_expected_direction() {
+    fn signed_value_moves_brightness_and_preserves_white_and_black_endpoints() {
         for value in [-50, 50] {
             let out = apply_adjustments(
                 &[80, 120, 160, 255],
@@ -577,30 +597,34 @@ mod tests {
             );
             assert!((out[2] as i32 - 160) * value > 0);
         }
-        assert_eq!(
-            apply_adjustments(
-                &[80, 120, 160, 255],
-                1,
-                1,
-                AdjustmentParams {
-                    value: -100,
-                    ..Default::default()
-                }
-            ),
-            [0, 0, 0, 255]
-        );
-        assert_eq!(
-            apply_adjustments(
-                &[80, 120, 160, 255],
-                1,
-                1,
-                AdjustmentParams {
-                    value: 100,
-                    ..Default::default()
-                }
-            )[2],
-            255
-        );
+
+        // Pure paper white [255, 255, 255] and pure black [0, 0, 0] remain intact at both extremes
+        for value in [-100, -50, 50, 100] {
+            assert_eq!(
+                apply_adjustments(
+                    &[255, 255, 255, 255],
+                    1,
+                    1,
+                    AdjustmentParams {
+                        value,
+                        ..Default::default()
+                    }
+                ),
+                [255, 255, 255, 255]
+            );
+            assert_eq!(
+                apply_adjustments(
+                    &[0, 0, 0, 255],
+                    1,
+                    1,
+                    AdjustmentParams {
+                        value,
+                        ..Default::default()
+                    }
+                ),
+                [0, 0, 0, 255]
+            );
+        }
     }
 
     #[test]
