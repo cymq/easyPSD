@@ -372,8 +372,9 @@ pub fn render_intent_previews(
 
     let srgb_profile = lcms2::Profile::new_srgb();
 
-    // Proofing transform (CMYK -> sRGB) enforces RelativeColorimetric so paper white maps
-    // cleanly to display white (255), matching professional proofing tools like Krita.
+    // Proofing transform (CMYK -> sRGB) enforces RelativeColorimetric with Black Point Compensation
+    // so paper white maps to display white (255) and CMYK rich black maps cleanly to display black,
+    // matching Krita's default display color management when viewing a CMYK PSD.
     let t_cmyk_to_rgb = lcms2::Transform::new_flags_context(
         lcms2::GlobalContext::new(),
         &cmyk_profile,
@@ -381,7 +382,9 @@ pub fn render_intent_previews(
         &srgb_profile,
         lcms2::PixelFormat::RGBA_8,
         lcms2::Intent::RelativeColorimetric,
-        lcms2::Flags::NO_CACHE | lcms2::Flags::HIGHRES_PRECALC,
+        lcms2::Flags::NO_CACHE
+            | lcms2::Flags::HIGHRES_PRECALC
+            | lcms2::Flags::BLACKPOINT_COMPENSATION,
     )
     .map_err(|e| AppError::TransformCreationError(e.to_string()))?;
 
