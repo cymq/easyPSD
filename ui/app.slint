@@ -195,6 +195,7 @@ component AdjustmentRow inherits HorizontalLayout {
 
     callback value-dragging(int);
     callback value-committed(int);
+    pure callback parse-input(string, int, int, int) -> int;
 
     spacing: 6px;
     height: 22px;
@@ -205,6 +206,14 @@ component AdjustmentRow inherits HorizontalLayout {
         0.0,
         1.0
     );
+
+    function commit-text(raw: string) {
+        let next = root.parse-input(raw, root.value, root.minimum, root.maximum);
+        if (next != root.value) {
+            root.value = next;
+            root.value-committed(next);
+        }
+    }
 
     // 1. Fixed-width label (double-click resets to 0)
     Rectangle {
@@ -224,6 +233,11 @@ component AdjustmentRow inherits HorizontalLayout {
 
         TouchArea {
             enabled: root.enabled;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && val-input.has-focus) {
+                    val-input.clear-focus();
+                }
+            }
             double-clicked => {
                 if (root.value != 0) {
                     root.value = 0;
@@ -295,6 +309,9 @@ component AdjustmentRow inherits HorizontalLayout {
                 }
                 if (event.button == PointerEventButton.left) {
                     if (event.kind == PointerEventKind.down) {
+                        if (val-input.has-focus) {
+                            val-input.clear-focus();
+                        }
                         self.update-from-mouse(self.mouse-x);
                     } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                         root.value-committed(root.value);
@@ -317,16 +334,21 @@ component AdjustmentRow inherits HorizontalLayout {
         }
     }
 
-    // 3. Fixed-width numeric DragValue / input box (horizontal drag or double-click reset)
+    // 3. Fixed-width direct numeric input box
     val-box := Rectangle {
         width: 54px;
         height: 20px;
         border-radius: 4px;
-        background: val-ta.has-hover && root.enabled ? Theme.hover-bg : Theme.field-bg;
+        background: val-input.has-focus
+            ? Theme.surface
+            : (activate-ta.has-hover && root.enabled ? Theme.hover-bg : Theme.field-bg);
         border-width: 1px;
-        border-color: (val-ta.has-hover || val-ta.pressed) && root.enabled ? Theme.logo : Theme.border;
+        border-color: (val-input.has-focus || activate-ta.has-hover) && root.enabled
+            ? Theme.logo
+            : Theme.border;
+        clip: true;
 
-        Text {
+        if !val-input.has-focus : Text {
             width: 100%;
             height: 100%;
             text: "\{root.value}\{root.suffix}";
@@ -336,41 +358,37 @@ component AdjustmentRow inherits HorizontalLayout {
             vertical-alignment: center;
         }
 
-        val-ta := TouchArea {
+        val-input := TextInput {
+            x: 4px;
+            width: parent.width - 8px;
+            height: 100%;
+            opacity: self.has-focus ? 1.0 : 0.0;
             enabled: root.enabled;
-            mouse-cursor: root.enabled ? ew-resize : default;
+            font-size: 11px;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            single-line: true;
 
-            property <int> start-value: 0;
-
-            pointer-event(event) => {
-                if (!root.enabled) {
-                    return;
-                }
-                if (event.button == PointerEventButton.left) {
-                    if (event.kind == PointerEventKind.down) {
-                        self.start-value = root.value;
-                    } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
-                        root.value-committed(root.value);
-                    }
-                }
+            accepted => {
+                self.clear-focus();
             }
 
-            moved => {
-                if (self.pressed && root.enabled) {
-                    let delta = round((self.mouse-x - self.pressed-x) / 2px);
-                    let next = clamp(self.start-value + delta, root.minimum, root.maximum);
-                    if (next != root.value) {
-                        root.value = next;
-                        root.value-dragging(next);
-                    }
+            changed has-focus => {
+                if (!self.has-focus) {
+                    root.commit-text(self.text);
                 }
             }
+        }
 
-            double-clicked => {
-                if (root.value != 0) {
-                    root.value = 0;
-                    root.value-committed(0);
-                }
+        activate-ta := TouchArea {
+            visible: !val-input.has-focus;
+            enabled: root.enabled && !val-input.has-focus;
+            mouse-cursor: root.enabled ? text : default;
+            clicked => {
+                val-input.text = "\{root.value}";
+                val-input.focus();
+                val-input.select-all();
             }
         }
     }
@@ -409,6 +427,7 @@ export component AppWindow inherits Window {
     callback adjustment-committed();
     callback reset-adjustments();
     callback export-psd();
+    pure callback parse-adjustment-input(string, int, int, int) -> int;
 
     pure function can-reset-adjustments() -> bool {
         root.hue != 0 || root.saturation != 0 || root.value != 0 ||
@@ -767,6 +786,9 @@ export component AppWindow inherits Window {
                                         enabled: root.cmyk-enabled && !root.loading;
                                         value-dragging(_) => { root.adjustment-dragging(); }
                                         value-committed(_) => { root.adjustment-committed(); }
+                                        parse-input(txt, cur, min-v, max-v) => {
+                                            root.parse-adjustment-input(txt, cur, min-v, max-v)
+                                        }
                                     }
 
                                     AdjustmentRow {
@@ -777,6 +799,9 @@ export component AppWindow inherits Window {
                                         enabled: root.cmyk-enabled && !root.loading;
                                         value-dragging(_) => { root.adjustment-dragging(); }
                                         value-committed(_) => { root.adjustment-committed(); }
+                                        parse-input(txt, cur, min-v, max-v) => {
+                                            root.parse-adjustment-input(txt, cur, min-v, max-v)
+                                        }
                                     }
 
                                     AdjustmentRow {
@@ -787,6 +812,9 @@ export component AppWindow inherits Window {
                                         enabled: root.cmyk-enabled && !root.loading;
                                         value-dragging(_) => { root.adjustment-dragging(); }
                                         value-committed(_) => { root.adjustment-committed(); }
+                                        parse-input(txt, cur, min-v, max-v) => {
+                                            root.parse-adjustment-input(txt, cur, min-v, max-v)
+                                        }
                                     }
 
                                     Rectangle {
@@ -807,6 +835,9 @@ export component AppWindow inherits Window {
                                         enabled: root.cmyk-enabled && !root.loading;
                                         value-dragging(_) => { root.adjustment-dragging(); }
                                         value-committed(_) => { root.adjustment-committed(); }
+                                        parse-input(txt, cur, min-v, max-v) => {
+                                            root.parse-adjustment-input(txt, cur, min-v, max-v)
+                                        }
                                     }
 
                                     AdjustmentRow {
@@ -817,6 +848,9 @@ export component AppWindow inherits Window {
                                         enabled: root.cmyk-enabled && !root.loading;
                                         value-dragging(_) => { root.adjustment-dragging(); }
                                         value-committed(_) => { root.adjustment-committed(); }
+                                        parse-input(txt, cur, min-v, max-v) => {
+                                            root.parse-adjustment-input(txt, cur, min-v, max-v)
+                                        }
                                     }
 
                                     AdjustmentRow {
@@ -827,6 +861,9 @@ export component AppWindow inherits Window {
                                         enabled: root.cmyk-enabled && !root.loading;
                                         value-dragging(_) => { root.adjustment-dragging(); }
                                         value-committed(_) => { root.adjustment-committed(); }
+                                        parse-input(txt, cur, min-v, max-v) => {
+                                            root.parse-adjustment-input(txt, cur, min-v, max-v)
+                                        }
                                     }
 
                                     Text {

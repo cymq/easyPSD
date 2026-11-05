@@ -100,6 +100,28 @@ fn display_filename(path: &str, placeholder: &str) -> String {
     }
 }
 
+/// Parses a user-entered adjustment text string (supporting ASCII and full-width digits/signs
+/// as well as optional trailing degree symbols), clamping to `[min_val, max_val]`.
+/// Falls back to `fallback` if the text cannot be parsed as an integer.
+fn parse_adjustment_input(raw: &str, fallback: i32, min_val: i32, max_val: i32) -> i32 {
+    let normalized: String = raw
+        .trim()
+        .chars()
+        .filter(|&c| c != '°' && c != '度' && !c.is_whitespace())
+        .map(|c| match c {
+            '０'..='９' => char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c),
+            '－' | 'ー' | '−' | '‐' | '―' => '-',
+            '＋' => '+',
+            _ => c,
+        })
+        .collect();
+
+    match normalized.parse::<i32>() {
+        Ok(val) => val.clamp(min_val, max_val),
+        Err(_) => fallback.clamp(min_val, max_val),
+    }
+}
+
 /// Opens the OS file manager and highlights the written PSD file.
 fn open_folder(target_path: &str) {
     let path = Path::new(target_path);
@@ -474,6 +496,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let state = Arc::new(Mutex::new(AppInner::new()));
 
+    // 0. Parse Direct Numeric Input in Adjustment Boxes
+    app.on_parse_adjustment_input(|raw, current, min_val, max_val| {
+        parse_adjustment_input(raw.as_str(), current, min_val, max_val)
+    });
+
     // 1. Toggle CMYK Mode
     {
         let state = Arc::clone(&state);
@@ -773,5 +800,17 @@ mod tests {
             display_filename(r"C:\images\sample.png", "画像ファイルが未選択です"),
             "sample.png"
         );
+    }
+
+    #[test]
+    fn parse_adjustment_input_handles_ascii_fullwidth_clamping_and_fallback() {
+        assert_eq!(parse_adjustment_input("-45", 0, -90, 90), -45);
+        assert_eq!(parse_adjustment_input("+30°", 0, -90, 90), 30);
+        assert_eq!(parse_adjustment_input("－６５", 0, -100, 100), -65);
+        assert_eq!(parse_adjustment_input("250", 0, -100, 100), 100);
+        assert_eq!(parse_adjustment_input("-250", 0, -90, 90), -90);
+        assert_eq!(parse_adjustment_input("", 25, -100, 100), 25);
+        assert_eq!(parse_adjustment_input("-", -15, -100, 100), -15);
+        assert_eq!(parse_adjustment_input("abc", 10, -100, 100), 10);
     }
 }
