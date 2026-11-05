@@ -1,5 +1,7 @@
+//! Pre-CMYK sRGB image adjustment engine (local Shadows/Highlights, midtone contrast, and HSV).
+
 use apeireth_image_algo::tone::{ShadowsHighlights, shadows_highlights};
-use palette::{Darken, Desaturate, FromColor, Hsv, Lighten, Saturate, ShiftHue, Srgb};
+use palette::{Darken, Desaturate, FromColor, Hsv, Lighten, ShiftHue, Srgb};
 
 /// User-configurable image adjustment parameters applied in sRGB space
 /// immediately prior to ICC CMYK conversion.
@@ -60,6 +62,19 @@ impl AdjustmentParams {
 const REFERENCE_IMAGE_LONG_EDGE: f32 = 1600.0;
 const REFERENCE_TONE_RADIUS: f32 = 30.0;
 const SATURATION_EPSILON: f32 = 1e-6;
+const MAX_SATURATION_BOOST_GAIN: f32 = 2.0;
+
+/// Smoothly boosts HSV saturation `s` in `[0.0, 1.0]` by `amount` in `[0.0, 1.0]`
+/// using a Schlick rational curve: `S' = ((1 + k) * S) / (1 + k * S)` where `k = 2 * amount`.
+///
+/// Unlike linear headroom interpolation (`S + (1 - S) * amount`), which forces near-neutral
+/// pixels (`S ~ 0.01`) to jump immediately to `amount`, this curve scales low-saturation
+/// regions gently in proportion to their existing chroma while smoothly compressing toward `1.0`.
+#[inline]
+fn boost_hsv_saturation(s: f32, amount: f32) -> f32 {
+    let k = MAX_SATURATION_BOOST_GAIN * amount.clamp(0.0, 1.0);
+    ((1.0 + k) * s / (1.0 + k * s)).clamp(0.0, 1.0)
+}
 
 /// Applies local Shadows/Highlights and midtone contrast, followed by HSV
 /// adjustments, to an interleaved 8-bit sRGB RGBA image.
@@ -134,7 +149,7 @@ pub fn apply_adjustments(
                 hsv = hsv.shift_hue(params.hue as f32);
             }
             if saturation > 0.0 && hsv.saturation > SATURATION_EPSILON {
-                hsv = hsv.saturate(saturation);
+                hsv.saturation = boost_hsv_saturation(hsv.saturation, saturation);
             } else if saturation < 0.0 {
                 hsv = hsv.desaturate(-saturation);
             }
@@ -497,6 +512,55 @@ mod tests {
             },
         );
         assert_eq!(out, [240, 240, 240, 77]);
+    }
+
+    #[test]
+    fn positive_saturation_scales_near_neutral_pixels_gently_and_mid_tones_monotonically() {
+        // Near-white pixel with ~2% saturation: [250, 245, 245, 255]
+        let near_white = [250u8, 245, 245, 255];
+        let out_plus_50 = apply_adjustments(
+            &near_white,
+            1,
+            1,
+            AdjustmentParams {
+                saturation: 50,
+                ..Default::default()
+            },
+        );
+        let out_plus_100 = apply_adjustments(
+            &near_white,
+            1,
+            1,
+            AdjustmentParams {
+                saturation: 100,
+                ..Default::default()
+            },
+        );
+        // Previously, +50 dropped green/blue from 245 down to ~125; now they stay >= 230
+        assert!(out_plus_50[1] >= 238 && out_plus_50[1] < 245);
+        assert!(out_plus_100[1] >= 233 && out_plus_100[1] < out_plus_50[1]);
+
+        // Moderately saturated pixel: [200, 100, 100, 255] (S = 0.5)
+        let mid_sat = [200u8, 100, 100, 255];
+        let mid_50 = apply_adjustments(
+            &mid_sat,
+            1,
+            1,
+            AdjustmentParams {
+                saturation: 50,
+                ..Default::default()
+            },
+        );
+        let mid_100 = apply_adjustments(
+            &mid_sat,
+            1,
+            1,
+            AdjustmentParams {
+                saturation: 100,
+                ..Default::default()
+            },
+        );
+        assert!(mid_50[1] < 100 && mid_100[1] < mid_50[1]);
     }
 
     #[test]
