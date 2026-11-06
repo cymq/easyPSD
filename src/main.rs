@@ -1,16 +1,19 @@
-﻿//! Application entry point, GUI state management (`AppInner`), Slint event wiring,
-//! background worker thread orchestration, and OS shell helpers.
+//! Application entry point, GUI state management (`AppInner`), Slint event wiring,
+//! background worker thread orchestration, and OS/Web shell helpers.
 
 #![windows_subsystem = "windows"]
 
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 mod adjustment;
 mod conversion;
 mod psd;
+#[cfg(target_arch = "wasm32")]
+mod wasm_libc;
 
 use crate::adjustment::AdjustmentParams;
 use crate::conversion::{CachedIcc, CachedImage, RawPreview, RenderingIntent};
@@ -19,6 +22,7 @@ slint::include_modules!();
 
 const INPUT_PLACEHOLDER: &str = "画像ファイルが未選択です";
 const ICC_PLACEHOLDER: &str = "CMYKカラープロファイル (ICC) が未選択です";
+const GITHUB_REPO_URL: &str = "https://github.com/cymq/easyPSD";
 
 /// Coalesced background preview job queued during interactive image adjustments.
 #[derive(Clone, Copy)]
@@ -33,9 +37,12 @@ struct PreviewJob {
 /// Central state container for the application.
 /// Shared safely between the main GUI event loop and background processing threads via `Arc<Mutex<AppInner>>`.
 struct AppInner {
-    /// File path to the original source image.
+    /// File path (or display filename on Wasm) of the original source image.
     input_path: String,
-    /// File path to the target color profile (ICC or ICM).
+    /// Raw source image file bytes kept in memory on Wasm for full-resolution PSD export.
+    #[cfg(target_arch = "wasm32")]
+    input_bytes: Option<Arc<Vec<u8>>>,
+    /// File path (or display filename on Wasm) of the target color profile (ICC or ICM).
     icc_path: String,
     /// Flag enabling target profile CMYK simulation and comparison (disabled = direct RGB save).
     cmyk_enabled: bool,
@@ -71,6 +78,8 @@ impl AppInner {
     fn new() -> Self {
         Self {
             input_path: String::new(),
+            #[cfg(target_arch = "wasm32")]
+            input_bytes: None,
             icc_path: String::new(),
             cmyk_enabled: true,
             black_point_compensation: true,
@@ -122,7 +131,33 @@ fn parse_adjustment_input(raw: &str, fallback: i32, min_val: i32, max_val: i32) 
     }
 }
 
+/// Opens an external URL in the default browser (or a new tab on WebAssembly).
+fn open_url(url: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(win) = web_sys::window() {
+            let _ = win.open_with_url_and_target(url, "_blank");
+        }
+    }
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
+    {
+        let _ = Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    }
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+    {
+        let _ = Command::new("open").arg(url).spawn();
+    }
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(target_os = "windows", target_os = "macos"))
+    ))]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
 /// Opens the OS file manager and highlights the written PSD file.
+#[cfg(not(target_arch = "wasm32"))]
 fn open_folder(target_path: &str) {
     let path = Path::new(target_path);
     let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -145,6 +180,159 @@ fn open_folder(target_path: &str) {
             let _ = Command::new("xdg-open").arg(parent).spawn();
         }
     }
+}
+
+/// Resizes the Slint window to match the current browser viewport (`window.innerWidth` x `window.innerHeight`).
+#[cfg(target_arch = "wasm32")]
+fn sync_browser_window_size(ui: &AppWindow) {
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let width = win
+        .inner_width()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1080.0)
+        .max(320.0) as f32;
+    let height = win
+        .inner_height()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(740.0)
+        .max(240.0) as f32;
+    ui.window().set_size(slint::LogicalSize::new(width, height));
+}
+
+/// Synchronizes the Slint window size with the browser viewport initially and on every `resize` event.
+#[cfg(target_arch = "wasm32")]
+fn setup_browser_viewport_sync(app: &AppWindow) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    sync_browser_window_size(app);
+
+    let ui_weak_init = app.as_weak();
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(
+            &wasm_bindgen::JsValue::NULL,
+        ))
+        .await;
+        if let Some(ui) = ui_weak_init.upgrade() {
+            sync_browser_window_size(&ui);
+        }
+    });
+
+    if let Some(win) = web_sys::window() {
+        let ui_weak_resize = app.as_weak();
+        let on_resize = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+            if let Some(ui) = ui_weak_resize.upgrade() {
+                sync_browser_window_size(&ui);
+            }
+        });
+        win.set_onresize(Some(on_resize.as_ref().unchecked_ref()));
+        on_resize.forget();
+    }
+}
+
+/// Opens a browser `<input type="file">` dialog and passes `(filename, bytes)` to `on_picked`.
+#[cfg(target_arch = "wasm32")]
+fn pick_file_in_browser(accept: &str, on_picked: impl FnOnce(String, Vec<u8>) + 'static) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Ok(element) = document.create_element("input") else {
+        return;
+    };
+    let Ok(input) = element.dyn_into::<web_sys::HtmlInputElement>() else {
+        return;
+    };
+
+    input.set_type("file");
+    input.set_accept(accept);
+    let _ = input.set_attribute("style", "display: none;");
+
+    if let Some(body) = document.body() {
+        let _ = body.append_child(&input);
+    }
+
+    let input_for_change = input.clone();
+    let onchange = Closure::once(move |_event: web_sys::Event| {
+        let files = input_for_change.files();
+        let _ = input_for_change.remove();
+
+        let Some(files) = files else {
+            return;
+        };
+        let Some(file) = files.get(0) else {
+            return;
+        };
+        let file_name = file.name();
+
+        let Ok(reader) = web_sys::FileReader::new() else {
+            return;
+        };
+        let reader_for_load = reader.clone();
+        let onload = Closure::once(move |_ev: web_sys::Event| {
+            if let Ok(result) = reader_for_load.result() {
+                let array = js_sys::Uint8Array::new(&result);
+                let bytes = array.to_vec();
+                on_picked(file_name, bytes);
+            }
+        });
+        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+        onload.forget();
+        let _ = reader.read_as_array_buffer(&file);
+    });
+
+    input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+    onchange.forget();
+    input.click();
+}
+
+/// Triggers a browser file download for an in-memory PSD byte slice.
+#[cfg(target_arch = "wasm32")]
+fn download_bytes_in_browser(filename: &str, bytes: &[u8]) {
+    use wasm_bindgen::JsCast;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+
+    let uint8_array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::of1(&uint8_array);
+    let bag = web_sys::BlobPropertyBag::new();
+    bag.set_type("image/vnd.adobe.photoshop");
+
+    let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag) else {
+        return;
+    };
+    let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+        return;
+    };
+
+    if let Ok(el) = document.create_element("a")
+        && let Ok(anchor) = el.dyn_into::<web_sys::HtmlAnchorElement>()
+    {
+        anchor.set_href(&url);
+        anchor.set_download(filename);
+        let _ = anchor.set_attribute("style", "display: none;");
+        if let Some(body) = document.body() {
+            let _ = body.append_child(&anchor);
+        }
+        anchor.click();
+        anchor.remove();
+    }
+
+    let _ = web_sys::Url::revoke_object_url(&url);
 }
 
 /// Converts a `RawPreview` RGBA buffer into a thread-safe `SharedPixelBuffer<Rgba8Pixel>`.
@@ -186,6 +374,72 @@ fn read_adjustments_from_window(window: &AppWindow) -> AdjustmentParams {
     }
 }
 
+/// Processes queued preview jobs from `pending_preview_job` and updates the Slint window.
+fn run_preview_worker_loop(state_clone: Arc<Mutex<AppInner>>, ui_weak: slint::Weak<AppWindow>) {
+    loop {
+        let (job, source, icc) = {
+            let mut s = state_clone.lock().unwrap();
+            let Some(job) = s.pending_preview_job.take() else {
+                s.preview_worker_busy = false;
+                break;
+            };
+            if s.conversion_generation != job.generation || !s.cmyk_enabled {
+                continue;
+            }
+            let (Some(src), Some(icc)) = (s.cached_image.clone(), s.cached_icc.clone()) else {
+                s.preview_worker_busy = false;
+                break;
+            };
+            (job, src, icc)
+        };
+
+        let intents_slice: &[RenderingIntent] = if job.all_intents {
+            &RenderingIntent::ALL
+        } else {
+            std::slice::from_ref(&job.active_intent)
+        };
+
+        if let Ok(rendered) = crate::conversion::render_intent_previews(
+            &source,
+            &icc,
+            job.adjustments,
+            job.black_point_compensation,
+            intents_slice,
+        ) {
+            let rendered_buffers: Vec<(RenderingIntent, SharedPixelBuffer<Rgba8Pixel>)> = rendered
+                .iter()
+                .map(|(intent, preview)| (*intent, raw_preview_to_buffer(preview)))
+                .collect();
+
+            let should_update_ui = {
+                let mut s = state_clone.lock().unwrap();
+                if s.conversion_generation == job.generation && s.cmyk_enabled {
+                    let matches_latest = s.adjustments == job.adjustments
+                        && s.black_point_compensation == job.black_point_compensation;
+                    for (intent, buf) in rendered_buffers {
+                        let idx = intent.to_index();
+                        s.preview_buffers[idx] = Some(buf);
+                        if matches_latest {
+                            s.intent_stale[idx] = false;
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if should_update_ui {
+                let state_for_ui = Arc::clone(&state_clone);
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                    let s = state_for_ui.lock().unwrap();
+                    sync_previews_to_window(&ui, &s);
+                });
+            }
+        }
+    }
+}
+
 /// Spawns the single-flight background worker if not already running to process `pending_preview_job`.
 fn ensure_preview_worker_running(state: &Arc<Mutex<AppInner>>, ui_weak: slint::Weak<AppWindow>) {
     {
@@ -198,70 +452,18 @@ fn ensure_preview_worker_running(state: &Arc<Mutex<AppInner>>, ui_weak: slint::W
 
     let state_clone = Arc::clone(state);
 
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(move || {
-        loop {
-            let (job, source, icc) = {
-                let mut s = state_clone.lock().unwrap();
-                let Some(job) = s.pending_preview_job.take() else {
-                    s.preview_worker_busy = false;
-                    break;
-                };
-                if s.conversion_generation != job.generation || !s.cmyk_enabled {
-                    continue;
-                }
-                let (Some(src), Some(icc)) = (s.cached_image.clone(), s.cached_icc.clone()) else {
-                    s.preview_worker_busy = false;
-                    break;
-                };
-                (job, src, icc)
-            };
+        run_preview_worker_loop(state_clone, ui_weak);
+    });
 
-            let intents_slice: &[RenderingIntent] = if job.all_intents {
-                &RenderingIntent::ALL
-            } else {
-                std::slice::from_ref(&job.active_intent)
-            };
-
-            if let Ok(rendered) = crate::conversion::render_intent_previews(
-                &source,
-                &icc,
-                job.adjustments,
-                job.black_point_compensation,
-                intents_slice,
-            ) {
-                let rendered_buffers: Vec<(RenderingIntent, SharedPixelBuffer<Rgba8Pixel>)> =
-                    rendered
-                        .iter()
-                        .map(|(intent, preview)| (*intent, raw_preview_to_buffer(preview)))
-                        .collect();
-
-                let should_update_ui = {
-                    let mut s = state_clone.lock().unwrap();
-                    if s.conversion_generation == job.generation && s.cmyk_enabled {
-                        let matches_latest = s.adjustments == job.adjustments
-                            && s.black_point_compensation == job.black_point_compensation;
-                        for (intent, buf) in rendered_buffers {
-                            let idx = intent.to_index();
-                            s.preview_buffers[idx] = Some(buf);
-                            if matches_latest {
-                                s.intent_stale[idx] = false;
-                            }
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                };
-
-                if should_update_ui {
-                    let state_for_ui = Arc::clone(&state_clone);
-                    let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                        let s = state_for_ui.lock().unwrap();
-                        sync_previews_to_window(&ui, &s);
-                    });
-                }
-            }
-        }
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(
+            &wasm_bindgen::JsValue::NULL,
+        ))
+        .await;
+        run_preview_worker_loop(state_clone, ui_weak);
     });
 }
 
@@ -304,6 +506,103 @@ fn schedule_adjustment_preview(
 
     if should_spawn {
         ensure_preview_worker_running(state, ui_weak);
+    }
+}
+
+/// Executes initial loading and 4-intent preview rendering for the active generation.
+fn run_initial_preview_load(
+    state_clone: Arc<Mutex<AppInner>>,
+    ui_weak: slint::Weak<AppWindow>,
+    input_path: String,
+    icc_path: String,
+    existing_img: Option<CachedImage>,
+    existing_icc: Option<CachedIcc>,
+    current_gen: u64,
+    current_adjustments: AdjustmentParams,
+    current_bpc: bool,
+) {
+    let load_result = (|| -> Result<
+        (CachedImage, CachedIcc, Vec<(RenderingIntent, RawPreview)>),
+        crate::conversion::AppError,
+    > {
+        let src = match existing_img {
+            Some(c) => c,
+            None => crate::conversion::load_preview_source(&input_path)?,
+        };
+        let icc = match existing_icc {
+            Some(c) => c,
+            None => crate::conversion::load_cmyk_icc(&icc_path)?,
+        };
+
+        let rendered = crate::conversion::render_intent_previews(
+            &src,
+            &icc,
+            current_adjustments,
+            current_bpc,
+            &RenderingIntent::ALL,
+        )?;
+
+        Ok((src, icc, rendered))
+    })();
+
+    match load_result {
+        Ok((src, icc, rendered)) => {
+            let orig_buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                &src.rgba,
+                src.width as u32,
+                src.height as u32,
+            );
+            let rendered_buffers: Vec<(RenderingIntent, SharedPixelBuffer<Rgba8Pixel>)> = rendered
+                .iter()
+                .map(|(intent, preview)| (*intent, raw_preview_to_buffer(preview)))
+                .collect();
+
+            let should_update_ui = {
+                let mut s = state_clone.lock().unwrap();
+                if s.conversion_generation == current_gen && s.cmyk_enabled {
+                    s.cached_image = Some(src);
+                    s.cached_icc = Some(icc);
+                    s.preview_buffers[0] = Some(orig_buf);
+                    for (intent, buf) in rendered_buffers {
+                        let idx = intent.to_index();
+                        s.preview_buffers[idx] = Some(buf);
+                        s.intent_stale[idx] = false;
+                    }
+                    s.loading = false;
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if should_update_ui {
+                let state_for_ui = Arc::clone(&state_clone);
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                    let s = state_for_ui.lock().unwrap();
+                    ui.set_loading(s.loading);
+                    sync_previews_to_window(&ui, &s);
+                });
+            }
+        }
+        Err(_) => {
+            let should_update_ui = {
+                let mut s = state_clone.lock().unwrap();
+                if s.conversion_generation == current_gen {
+                    s.loading = false;
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_update_ui {
+                let state_for_ui = Arc::clone(&state_clone);
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                    let s = state_for_ui.lock().unwrap();
+                    ui.set_loading(s.loading);
+                    sync_previews_to_window(&ui, &s);
+                });
+            }
+        }
     }
 }
 
@@ -366,12 +665,17 @@ fn handle_settings_changed(state: &Arc<Mutex<AppInner>>, window: &AppWindow) {
     window.set_original_preview(Image::default());
     window.set_active_preview(Image::default());
 
-    if cmyk_enabled
+    #[cfg(not(target_arch = "wasm32"))]
+    let can_render = cmyk_enabled
         && !input_path.is_empty()
         && !icc_path.is_empty()
         && Path::new(&input_path).exists()
-        && Path::new(&icc_path).exists()
-    {
+        && Path::new(&icc_path).exists();
+
+    #[cfg(target_arch = "wasm32")]
+    let can_render = cmyk_enabled && existing_img.is_some() && existing_icc.is_some();
+
+    if can_render {
         {
             let mut inner = state.lock().unwrap();
             inner.loading = true;
@@ -381,111 +685,38 @@ fn handle_settings_changed(state: &Arc<Mutex<AppInner>>, window: &AppWindow) {
         let state_clone = Arc::clone(state);
         let ui_weak = window.as_weak();
 
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
-            let load_result = (|| -> Result<
-                (CachedImage, CachedIcc, Vec<(RenderingIntent, RawPreview)>),
-                crate::conversion::AppError,
-            > {
-                let src = match existing_img {
-                    Some(cached) if cached.path == input_path => cached,
-                    _ => crate::conversion::load_preview_source(&input_path)?,
-                };
-                let icc = match existing_icc {
-                    Some(cached) if cached.path == icc_path => cached,
-                    _ => crate::conversion::load_cmyk_icc(&icc_path)?,
-                };
-                let rendered = crate::conversion::render_intent_previews(
-                    &src,
-                    &icc,
-                    current_adjustments,
-                    current_bpc,
-                    &RenderingIntent::ALL,
-                )?;
-                Ok((src, icc, rendered))
-            })();
+            run_initial_preview_load(
+                state_clone,
+                ui_weak,
+                input_path,
+                icc_path,
+                existing_img,
+                existing_icc,
+                current_gen,
+                current_adjustments,
+                current_bpc,
+            );
+        });
 
-            match load_result {
-                Ok((src, icc, rendered)) => {
-                    let orig_buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                        &src.rgba,
-                        src.width as u32,
-                        src.height as u32,
-                    );
-                    let rendered_buffers: Vec<(RenderingIntent, SharedPixelBuffer<Rgba8Pixel>)> =
-                        rendered
-                            .iter()
-                            .map(|(intent, preview)| (*intent, raw_preview_to_buffer(preview)))
-                            .collect();
-
-                    let (updated, needs_followup_worker) = {
-                        let mut s = state_clone.lock().unwrap();
-                        if s.conversion_generation == current_gen {
-                            let settings_changed_during_load = s.adjustments != current_adjustments
-                                || s.black_point_compensation != current_bpc;
-
-                            s.preview_buffers[0] = Some(orig_buffer);
-                            for (intent, buf) in rendered_buffers {
-                                let idx = intent.to_index();
-                                s.preview_buffers[idx] = Some(buf);
-                                s.intent_stale[idx] = settings_changed_during_load;
-                            }
-                            s.cached_image = Some(src);
-                            s.cached_icc = Some(icc);
-                            s.loading = false;
-
-                            if settings_changed_during_load && s.cmyk_enabled {
-                                let active_intent = RenderingIntent::from_index(s.active_index)
-                                    .unwrap_or(RenderingIntent::Perceptual);
-                                s.pending_preview_job = Some(PreviewJob {
-                                    generation: s.conversion_generation,
-                                    adjustments: s.adjustments,
-                                    black_point_compensation: s.black_point_compensation,
-                                    all_intents: true,
-                                    active_intent,
-                                });
-                            }
-
-                            (true, settings_changed_during_load && s.cmyk_enabled)
-                        } else {
-                            (false, false)
-                        }
-                    };
-
-                    if updated {
-                        let state_for_ui = Arc::clone(&state_clone);
-                        let ui_weak_for_event = ui_weak.clone();
-                        let _ = ui_weak_for_event.upgrade_in_event_loop(move |ui| {
-                            let s = state_for_ui.lock().unwrap();
-                            ui.set_loading(s.loading);
-                            sync_previews_to_window(&ui, &s);
-                        });
-                    }
-
-                    if needs_followup_worker {
-                        ensure_preview_worker_running(&state_clone, ui_weak);
-                    }
-                }
-                Err(_) => {
-                    let updated = {
-                        let mut s = state_clone.lock().unwrap();
-                        if s.conversion_generation == current_gen {
-                            s.loading = false;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-
-                    if updated {
-                        let state_for_ui = Arc::clone(&state_clone);
-                        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                            let s = state_for_ui.lock().unwrap();
-                            ui.set_loading(s.loading);
-                            sync_previews_to_window(&ui, &s);
-                        });
-                    }
-                }
-            }
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(
+                &wasm_bindgen::JsValue::NULL,
+            ))
+            .await;
+            run_initial_preview_load(
+                state_clone,
+                ui_weak,
+                input_path,
+                icc_path,
+                existing_img,
+                existing_icc,
+                current_gen,
+                current_adjustments,
+                current_bpc,
+            );
         });
     }
 }
@@ -494,9 +725,15 @@ fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
 
+    #[cfg(target_arch = "wasm32")]
+    setup_browser_viewport_sync(&app);
+
     let state = Arc::new(Mutex::new(AppInner::new()));
 
-    // 0. Parse Direct Numeric Input in Adjustment Boxes
+    // 0. Open GitHub Repository & Parse Direct Numeric Input in Adjustment Boxes
+    app.on_open_github(|| {
+        open_url(GITHUB_REPO_URL);
+    });
     app.on_parse_adjustment_input(|raw, current, min_val, max_val| {
         parse_adjustment_input(raw.as_str(), current, min_val, max_val)
     });
@@ -524,6 +761,8 @@ fn main() -> Result<(), slint::PlatformError> {
             if state.lock().unwrap().loading {
                 return;
             }
+
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(path) = rfd::FileDialog::new()
                 .set_title("元の画像を選択")
                 .add_filter(
@@ -538,6 +777,31 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 handle_settings_changed(&state, &ui);
             }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let state_for_pick = Arc::clone(&state);
+                let ui_weak_for_pick = ui.as_weak();
+                pick_file_in_browser(
+                    ".png,.jpg,.jpeg,.tiff,.tif,.webp,image/*",
+                    move |name, bytes| {
+                        let Some(ui) = ui_weak_for_pick.upgrade() else {
+                            return;
+                        };
+                        if let Ok(cached_img) =
+                            crate::conversion::load_preview_source_from_memory(&name, &bytes)
+                        {
+                            {
+                                let mut inner = state_for_pick.lock().unwrap();
+                                inner.input_path = name;
+                                inner.input_bytes = Some(Arc::new(bytes));
+                                inner.cached_image = Some(cached_img);
+                            }
+                            handle_settings_changed(&state_for_pick, &ui);
+                        }
+                    },
+                );
+            }
         });
     }
 
@@ -550,6 +814,8 @@ fn main() -> Result<(), slint::PlatformError> {
             if state.lock().unwrap().loading {
                 return;
             }
+
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(path) = rfd::FileDialog::new()
                 .set_title("CMYKカラープロファイルを選択")
                 .add_filter("CMYKカラープロファイル", &["icc", "icm"])
@@ -560,6 +826,27 @@ fn main() -> Result<(), slint::PlatformError> {
                     inner.icc_path = path.to_string_lossy().to_string();
                 }
                 handle_settings_changed(&state, &ui);
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let state_for_pick = Arc::clone(&state);
+                let ui_weak_for_pick = ui.as_weak();
+                pick_file_in_browser(".icc,.icm", move |name, bytes| {
+                    let Some(ui) = ui_weak_for_pick.upgrade() else {
+                        return;
+                    };
+                    if let Ok(cached_icc) =
+                        crate::conversion::load_cmyk_icc_from_bytes(&name, bytes)
+                    {
+                        {
+                            let mut inner = state_for_pick.lock().unwrap();
+                            inner.icc_path = name;
+                            inner.cached_icc = Some(cached_icc);
+                        }
+                        handle_settings_changed(&state_for_pick, &ui);
+                    }
+                });
             }
         });
     }
@@ -657,126 +944,236 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = app.as_weak();
         app.on_export_psd(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let (
-                input_path,
-                icc_path,
-                cmyk_enabled,
-                loading,
-                active_index,
-                export_bpc,
-                export_adjustments,
-            ) = {
-                let inner = state.lock().unwrap();
-                (
-                    inner.input_path.clone(),
-                    inner.icc_path.clone(),
-                    inner.cmyk_enabled,
-                    inner.loading,
-                    inner.active_index,
-                    inner.black_point_compensation,
-                    inner.adjustments,
-                )
-            };
 
-            if loading || !Path::new(&input_path).exists() {
-                return;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let (
+                    input_path,
+                    icc_path,
+                    cmyk_enabled,
+                    loading,
+                    active_index,
+                    export_bpc,
+                    export_adjustments,
+                ) = {
+                    let inner = state.lock().unwrap();
+                    (
+                        inner.input_path.clone(),
+                        inner.icc_path.clone(),
+                        inner.cmyk_enabled,
+                        inner.loading,
+                        inner.active_index,
+                        inner.black_point_compensation,
+                        inner.adjustments,
+                    )
+                };
+
+                if loading || !Path::new(&input_path).exists() {
+                    return;
+                }
+
+                if cmyk_enabled && !Path::new(&icc_path).exists() {
+                    return;
+                }
+
+                if !cmyk_enabled {
+                    let orig_name = Path::new(&input_path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "output".to_string());
+                    let default_name = format!("{}_flat.psd", orig_name);
+
+                    if let Some(save_path) = rfd::FileDialog::new()
+                        .set_title("PSDの保存先を選択")
+                        .set_file_name(&default_name)
+                        .add_filter("PSDファイル (*.psd)", &["psd"])
+                        .save_file()
+                    {
+                        let save_path_str = save_path.to_string_lossy().to_string();
+                        {
+                            let mut inner = state.lock().unwrap();
+                            inner.loading = true;
+                            ui.set_loading(true);
+                        }
+
+                        let state_clone = Arc::clone(&state);
+                        let ui_weak_thread = ui.as_weak();
+
+                        std::thread::spawn(move || {
+                            let result =
+                                crate::psd::export_rgb_psd_file(&input_path, &save_path_str);
+                            {
+                                let mut s = state_clone.lock().unwrap();
+                                s.loading = false;
+                                if result.is_ok() {
+                                    open_folder(&save_path_str);
+                                }
+                            }
+
+                            let state_for_ui = Arc::clone(&state_clone);
+                            let _ = ui_weak_thread.upgrade_in_event_loop(move |ui| {
+                                let s = state_for_ui.lock().unwrap();
+                                ui.set_loading(s.loading);
+                            });
+                        });
+                    }
+                } else if active_index != 0 {
+                    let orig_name = Path::new(&input_path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "output".to_string());
+                    let suffix = RenderingIntent::from_index(active_index)
+                        .map(|intent| intent.suffix())
+                        .unwrap_or("converted");
+                    let default_name = format!("{}_cmyk_{}.psd", orig_name, suffix);
+
+                    if let Some(save_path) = rfd::FileDialog::new()
+                        .set_title("PSDの保存先を選択")
+                        .set_file_name(&default_name)
+                        .add_filter("PSDファイル (*.psd)", &["psd"])
+                        .save_file()
+                    {
+                        let save_path_str = save_path.to_string_lossy().to_string();
+                        let intent = RenderingIntent::from_index(active_index)
+                            .unwrap_or(RenderingIntent::Perceptual);
+
+                        {
+                            let mut inner = state.lock().unwrap();
+                            inner.loading = true;
+                            ui.set_loading(true);
+                        }
+
+                        let state_clone = Arc::clone(&state);
+                        let ui_weak_thread = ui.as_weak();
+
+                        std::thread::spawn(move || {
+                            let result = crate::psd::export_cmyk_psd_file(
+                                &input_path,
+                                &icc_path,
+                                intent,
+                                export_bpc,
+                                export_adjustments,
+                                &save_path_str,
+                            );
+                            {
+                                let mut s = state_clone.lock().unwrap();
+                                s.loading = false;
+                                if result.is_ok() {
+                                    open_folder(&save_path_str);
+                                }
+                            }
+
+                            let state_for_ui = Arc::clone(&state_clone);
+                            let _ = ui_weak_thread.upgrade_in_event_loop(move |ui| {
+                                let s = state_for_ui.lock().unwrap();
+                                ui.set_loading(s.loading);
+                            });
+                        });
+                    }
+                }
             }
 
-            if cmyk_enabled && !Path::new(&icc_path).exists() {
-                return;
-            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let (
+                    input_path,
+                    input_bytes,
+                    cached_icc,
+                    cmyk_enabled,
+                    loading,
+                    active_index,
+                    export_bpc,
+                    export_adjustments,
+                ) = {
+                    let inner = state.lock().unwrap();
+                    (
+                        inner.input_path.clone(),
+                        inner.input_bytes.clone(),
+                        inner.cached_icc.clone(),
+                        inner.cmyk_enabled,
+                        inner.loading,
+                        inner.active_index,
+                        inner.black_point_compensation,
+                        inner.adjustments,
+                    )
+                };
 
-            if !cmyk_enabled {
+                let Some(input_bytes) = input_bytes else {
+                    return;
+                };
+                if loading {
+                    return;
+                }
+
                 let orig_name = Path::new(&input_path)
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "output".to_string());
-                let default_name = format!("{}_flat.psd", orig_name);
 
-                if let Some(save_path) = rfd::FileDialog::new()
-                    .set_title("PSDの保存先を選択")
-                    .set_file_name(&default_name)
-                    .add_filter("PSDファイル (*.psd)", &["psd"])
-                    .save_file()
-                {
-                    let save_path_str = save_path.to_string_lossy().to_string();
+                if !cmyk_enabled {
+                    let default_name = format!("{}_flat.psd", orig_name);
                     {
                         let mut inner = state.lock().unwrap();
                         inner.loading = true;
                         ui.set_loading(true);
                     }
-
                     let state_clone = Arc::clone(&state);
-                    let ui_weak_thread = ui.as_weak();
+                    let ui_weak_task = ui.as_weak();
 
-                    std::thread::spawn(move || {
-                        let result = crate::psd::export_rgb_psd_file(&input_path, &save_path_str);
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(
+                            &wasm_bindgen::JsValue::NULL,
+                        ))
+                        .await;
+                        if let Ok(psd_bytes) = crate::psd::export_rgb_psd_bytes(&input_bytes) {
+                            download_bytes_in_browser(&default_name, &psd_bytes);
+                        }
                         {
                             let mut s = state_clone.lock().unwrap();
                             s.loading = false;
-                            if result.is_ok() {
-                                open_folder(&save_path_str);
-                            }
                         }
-
-                        let state_for_ui = Arc::clone(&state_clone);
-                        let _ = ui_weak_thread.upgrade_in_event_loop(move |ui| {
-                            let s = state_for_ui.lock().unwrap();
-                            ui.set_loading(s.loading);
-                        });
+                        if let Some(ui) = ui_weak_task.upgrade() {
+                            ui.set_loading(false);
+                        }
                     });
-                }
-            } else if active_index != 0 {
-                let orig_name = Path::new(&input_path)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "output".to_string());
-                let suffix = RenderingIntent::from_index(active_index)
-                    .map(|intent| intent.suffix())
-                    .unwrap_or("converted");
-                let default_name = format!("{}_cmyk_{}.psd", orig_name, suffix);
-
-                if let Some(save_path) = rfd::FileDialog::new()
-                    .set_title("PSDの保存先を選択")
-                    .set_file_name(&default_name)
-                    .add_filter("PSDファイル (*.psd)", &["psd"])
-                    .save_file()
-                {
-                    let save_path_str = save_path.to_string_lossy().to_string();
+                } else if active_index != 0 {
+                    let Some(icc) = cached_icc else {
+                        return;
+                    };
                     let intent = RenderingIntent::from_index(active_index)
                         .unwrap_or(RenderingIntent::Perceptual);
+                    let suffix = intent.suffix();
+                    let default_name = format!("{}_cmyk_{}.psd", orig_name, suffix);
 
                     {
                         let mut inner = state.lock().unwrap();
                         inner.loading = true;
                         ui.set_loading(true);
                     }
-
                     let state_clone = Arc::clone(&state);
-                    let ui_weak_thread = ui.as_weak();
+                    let ui_weak_task = ui.as_weak();
 
-                    std::thread::spawn(move || {
-                        let result = crate::psd::export_cmyk_psd_file(
-                            &input_path,
-                            &icc_path,
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(
+                            &wasm_bindgen::JsValue::NULL,
+                        ))
+                        .await;
+                        if let Ok(psd_bytes) = crate::psd::export_cmyk_psd_bytes(
+                            &input_bytes,
+                            &icc,
                             intent,
                             export_bpc,
                             export_adjustments,
-                            &save_path_str,
-                        );
+                        ) {
+                            download_bytes_in_browser(&default_name, &psd_bytes);
+                        }
                         {
                             let mut s = state_clone.lock().unwrap();
                             s.loading = false;
-                            if result.is_ok() {
-                                open_folder(&save_path_str);
-                            }
                         }
-
-                        let state_for_ui = Arc::clone(&state_clone);
-                        let _ = ui_weak_thread.upgrade_in_event_loop(move |ui| {
-                            let s = state_for_ui.lock().unwrap();
-                            ui.set_loading(s.loading);
-                        });
+                        if let Some(ui) = ui_weak_task.upgrade() {
+                            ui.set_loading(false);
+                        }
                     });
                 }
             }

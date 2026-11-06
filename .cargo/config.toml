@@ -1,0 +1,5 @@
+[env]
+CC_wasm32_unknown_unknown = "C:/tools/wasi-sdk-34.0-x86_64-windows/bin/clang.exe"
+AR_wasm32_unknown_unknown = "C:/tools/wasi-sdk-34.0-x86_64-windows/bin/llvm-ar.exe"
+RANLIB_wasm32_unknown_unknown = "C:/tools/wasi-sdk-34.0-x86_64-windows/bin/llvm-ranlib.exe"
+CFLAGS_wasm32_unknown_unknown = "--sysroot=C:/tools/wasi-sdk-34.0-x86_64-windows/share/wasi-sysroot -isystem C:/tools/wasi-sdk-34.0-x86_64-windows/share/wasi-sysroot/include/wasm32-wasip1 -D__wasi__ -DCMS_NO_PTHREADS -fno-exceptions"

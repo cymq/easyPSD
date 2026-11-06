@@ -1,0 +1,14 @@
+[package]
+name = "libc"
+version = "0.2.191"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std"]
+std = []
+extra_traits = []
+use_std = ["std"]
+rustc-dep-of-std = []
+align = []
+const-extern-fn = []

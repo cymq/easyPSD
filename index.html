@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="utf-8" />
+    <meta id="viewport-meta" name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>easyPSD</title>
+    <link data-trunk rel="rust" />
+    <script>
+        (function () {
+            var MIN_WIDTH = 860;
+            var MIN_HEIGHT = 560;
+            var lastContent = "";
+
+            function updateViewport() {
+                var meta = document.getElementById("viewport-meta");
+                if (!meta) return;
+
+                // Measure physical/CSS screen dimensions in current orientation
+                var isLandscape = window.matchMedia("(orientation: landscape)").matches;
+                var sw = window.screen ? window.screen.width : window.innerWidth;
+                var sh = window.screen ? window.screen.height : window.innerHeight;
+                if ((isLandscape && sw < sh) || (!isLandscape && sw > sh)) {
+                    var tmp = sw;
+                    sw = sh;
+                    sh = tmp;
+                }
+
+                // Use innerWidth/innerHeight aspect ratio when available
+                var vw = window.innerWidth || sw || MIN_WIDTH;
+                var vh = window.innerHeight || sh || MIN_HEIGHT;
+                var aspect = vw / Math.max(vh, 1);
+
+                var nextContent;
+                if (sw < MIN_WIDTH || sh < MIN_HEIGHT) {
+                    var targetWidth = Math.ceil(Math.max(MIN_WIDTH, MIN_HEIGHT * aspect));
+                    nextContent = "width=" + targetWidth + ", user-scalable=yes";
+                } else {
+                    nextContent = "width=device-width, initial-scale=1.0";
+                }
+
+                if (nextContent !== lastContent) {
+                    meta.setAttribute("content", nextContent);
+                    lastContent = nextContent;
+                }
+            }
+
+            updateViewport();
+            window.addEventListener("resize", updateViewport);
+            window.addEventListener("orientationchange", function () {
+                setTimeout(updateViewport, 50);
+            });
+        })();
+    </script>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #F5F6F8;
+            touch-action: manipulation;
+        }
+        #canvas {
+            width: 100% !important;
+            height: 100% !important;
+            display: block;
+            outline: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+</body>
+</html>

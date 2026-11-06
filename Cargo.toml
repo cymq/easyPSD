@@ -3,14 +3,41 @@ name = "easyPSD"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.97"
+license = "GPL-3.0-only"
 
 [dependencies]
 slint = "1.10"
 lcms2 = { version = "6.0", features = ["static"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "tiff"] }
-rfd = "0.14"
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
 apeireth-image-algo = "=2.0.0-rc.5"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.14"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "Element",
+    "Event",
+    "File",
+    "FileList",
+    "FileReader",
+    "HtmlAnchorElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Node",
+    "Url",
+    "Window",
+] }
+
 [build-dependencies]
 slint-build = "1.10"
+
+[patch.crates-io]
+libc = { path = "crates/libc-patch" }

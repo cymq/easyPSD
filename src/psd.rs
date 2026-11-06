@@ -1,6 +1,8 @@
 //! Adobe PSD (Version 1) binary encoder, PackBits RLE scanline compressor,
 //! atomic disk writer, and high-level CMYK/RGB PSD export pipelines.
 
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use std::fs::File;
 use std::io::{BufWriter, Error, ErrorKind, Result, Write};
 use std::path::{Path, PathBuf};
@@ -53,6 +55,41 @@ pub fn export_cmyk_psd_file(
         .map_err(|e| format!("CMYK PSDファイルの書き込みに失敗しました: {}", e))
 }
 
+/// Applies image adjustments in sRGB space followed by forward CMM translation
+/// from in-memory image bytes and a cached CMYK ICC profile, returning encoded CMYK PSD bytes.
+#[allow(dead_code)]
+pub fn export_cmyk_psd_bytes(
+    image_bytes: &[u8],
+    icc: &crate::conversion::CachedIcc,
+    intent: crate::conversion::RenderingIntent,
+    black_point_compensation: bool,
+    adjustments: crate::adjustment::AdjustmentParams,
+) -> std::result::Result<Vec<u8>, String> {
+    let (width, height, raw_rgba) =
+        crate::conversion::load_normalized_srgb_image_from_memory(image_bytes)
+            .map_err(|e| format!("元画像の読み込みに失敗しました: {}", e))?;
+
+    let rgba_pixels = crate::adjustment::apply_adjustments(
+        &raw_rgba,
+        width as usize,
+        height as usize,
+        adjustments,
+    );
+
+    let cmyk_pixels = crate::conversion::convert_srgb_to_cmyk(
+        &rgba_pixels,
+        width as usize,
+        height as usize,
+        icc,
+        intent,
+        black_point_compensation,
+    )
+    .map_err(|e| format!("RGBからCMYKへの色変換に失敗しました: {}", e))?;
+
+    encode_cmyk_psd_bytes(width, height, &cmyk_pixels, &icc.bytes)
+        .map_err(|e| format!("CMYK PSDデータの生成に失敗しました: {}", e))
+}
+
 /// Normalizes the input image (embedded ICC -> sRGB and white background composite)
 /// and packages the RGB pixels into a flat RGB PSD file.
 pub fn export_rgb_psd_file(input_path: &str, output_path: &str) -> std::result::Result<(), String> {
@@ -61,6 +98,18 @@ pub fn export_rgb_psd_file(input_path: &str, output_path: &str) -> std::result::
 
     write_rgb_psd(width, height, &rgba_pixels, output_path)
         .map_err(|e| format!("RGB PSDファイルの書き込みに失敗しました: {}", e))
+}
+
+/// Normalizes in-memory input image bytes (embedded ICC -> sRGB and white background composite)
+/// and packages the RGB pixels into an in-memory flat RGB PSD byte vector.
+#[allow(dead_code)]
+pub fn export_rgb_psd_bytes(image_bytes: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let (width, height, rgba_pixels) =
+        crate::conversion::load_normalized_srgb_image_from_memory(image_bytes)
+            .map_err(|e| format!("元画像の読み込みに失敗しました: {}", e))?;
+
+    encode_rgb_psd_bytes(width, height, &rgba_pixels)
+        .map_err(|e| format!("RGB PSDデータの生成に失敗しました: {}", e))
 }
 
 /// Validates PSD image dimensions against the PSD v1 limit (1..=30,000) and verifies
@@ -248,6 +297,88 @@ fn write_psd_image_data<W: Write>(
     Ok(())
 }
 
+/// Writes a flattened (single-layer) CMYK PSD stream with an embedded target ICC color profile
+/// into any `Write` sink.
+pub fn write_cmyk_psd_to_writer<W: Write>(
+    writer: &mut W,
+    width: u32,
+    height: u32,
+    cmyk_pixels: &[u8],
+    icc_profile: &[u8],
+) -> Result<()> {
+    let total_pixels = validate_psd_buffer(width, height, cmyk_pixels)?;
+
+    let mut channels = vec![vec![0u8; total_pixels]; 4];
+    for i in 0..total_pixels {
+        channels[0][i] = 255 - cmyk_pixels[i * 4];
+        channels[1][i] = 255 - cmyk_pixels[i * 4 + 1];
+        channels[2][i] = 255 - cmyk_pixels[i * 4 + 2];
+        channels[3][i] = 255 - cmyk_pixels[i * 4 + 3];
+    }
+
+    // =====================================================================
+    // 1. File Header (26 bytes fixed-size)
+    // =====================================================================
+    writer.write_all(b"8BPS")?; // Signature: Always "8BPS"
+    writer.write_all(&1u16.to_be_bytes())?; // Version: Always 1
+    writer.write_all(&[0; 6])?; // Reserved: 6 bytes filled with zeros
+    writer.write_all(&4u16.to_be_bytes())?; // Number of channels: 4 (Cyan, Magenta, Yellow, Black)
+    writer.write_all(&height.to_be_bytes())?; // Image height - big-endian
+    writer.write_all(&width.to_be_bytes())?; // Image width - big-endian
+    writer.write_all(&8u16.to_be_bytes())?; // Channel depth: 8 bits per channel
+    writer.write_all(&4u16.to_be_bytes())?; // Color mode: 4 represents CMYK mode
+
+    // =====================================================================
+    // 2. Color Mode Data Section
+    // =====================================================================
+    writer.write_all(&0u32.to_be_bytes())?; // Length = 0
+
+    // =====================================================================
+    // 3. Image Resources Section (ICC Profile Resource 0x040F)
+    // =====================================================================
+    let profile_len = u32::try_from(icc_profile.len()).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "ICCプロファイルサイズが大きすぎます。",
+        )
+    })?;
+    let pad = if profile_len % 2 != 0 { 1 } else { 0 };
+    let block_len = 4 + 2 + 2 + 4 + profile_len + pad;
+
+    writer.write_all(&block_len.to_be_bytes())?;
+    writer.write_all(b"8BIM")?;
+    writer.write_all(&0x040Fu16.to_be_bytes())?;
+    writer.write_all(&[0, 0])?;
+    writer.write_all(&profile_len.to_be_bytes())?;
+    writer.write_all(icc_profile)?;
+    if pad > 0 {
+        writer.write_all(&[0])?;
+    }
+
+    // =====================================================================
+    // 4. Layer and Mask Information Section
+    // =====================================================================
+    writer.write_all(&0u32.to_be_bytes())?; // Section length = 0
+
+    // =====================================================================
+    // 5. Image Data Section (PackBits RLE Compressed Planar Channels)
+    // =====================================================================
+    write_psd_image_data(writer, width, height, &channels)
+}
+
+/// Encodes a flattened CMYK PSD with an embedded ICC profile into an in-memory `Vec<u8>`.
+#[allow(dead_code)]
+pub fn encode_cmyk_psd_bytes(
+    width: u32,
+    height: u32,
+    cmyk_pixels: &[u8],
+    icc_profile: &[u8],
+) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    write_cmyk_psd_to_writer(&mut buf, width, height, cmyk_pixels, icc_profile)?;
+    Ok(buf)
+}
+
 /// Writes a flattened (single-layer) CMYK PSD file with an embedded target ICC color profile.
 ///
 /// Employs PackBits RLE compressed channel data (`Compression = 1`) written in Planar Order
@@ -260,70 +391,19 @@ pub fn write_cmyk_psd(
     icc_profile: &[u8],
     output_path: &str,
 ) -> Result<()> {
-    let total_pixels = validate_psd_buffer(width, height, cmyk_pixels)?;
-
-    let mut channels = vec![vec![0u8; total_pixels]; 4];
-    for i in 0..total_pixels {
-        channels[0][i] = 255 - cmyk_pixels[i * 4];
-        channels[1][i] = 255 - cmyk_pixels[i * 4 + 1];
-        channels[2][i] = 255 - cmyk_pixels[i * 4 + 2];
-        channels[3][i] = 255 - cmyk_pixels[i * 4 + 3];
-    }
-
+    validate_psd_buffer(width, height, cmyk_pixels)?;
     write_file_atomically(output_path, |writer| {
-        // =====================================================================
-        // 1. File Header (26 bytes fixed-size)
-        // =====================================================================
-        writer.write_all(b"8BPS")?; // Signature: Always "8BPS"
-        writer.write_all(&1u16.to_be_bytes())?; // Version: Always 1
-        writer.write_all(&[0; 6])?; // Reserved: 6 bytes filled with zeros
-        writer.write_all(&4u16.to_be_bytes())?; // Number of channels: 4 (Cyan, Magenta, Yellow, Black)
-        writer.write_all(&height.to_be_bytes())?; // Image height - big-endian
-        writer.write_all(&width.to_be_bytes())?; // Image width - big-endian
-        writer.write_all(&8u16.to_be_bytes())?; // Channel depth: 8 bits per channel
-        writer.write_all(&4u16.to_be_bytes())?; // Color mode: 4 represents CMYK mode
-
-        // =====================================================================
-        // 2. Color Mode Data Section
-        // =====================================================================
-        writer.write_all(&0u32.to_be_bytes())?; // Length = 0
-
-        // =====================================================================
-        // 3. Image Resources Section (ICC Profile Resource 0x040F)
-        // =====================================================================
-        let profile_len = u32::try_from(icc_profile.len()).map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                "ICCプロファイルサイズが大きすぎます。",
-            )
-        })?;
-        let pad = if profile_len % 2 != 0 { 1 } else { 0 };
-        let block_len = 4 + 2 + 2 + 4 + profile_len + pad;
-
-        writer.write_all(&block_len.to_be_bytes())?;
-        writer.write_all(b"8BIM")?;
-        writer.write_all(&0x040Fu16.to_be_bytes())?;
-        writer.write_all(&[0, 0])?;
-        writer.write_all(&profile_len.to_be_bytes())?;
-        writer.write_all(icc_profile)?;
-        if pad > 0 {
-            writer.write_all(&[0])?;
-        }
-
-        // =====================================================================
-        // 4. Layer and Mask Information Section
-        // =====================================================================
-        writer.write_all(&0u32.to_be_bytes())?; // Section length = 0
-
-        // =====================================================================
-        // 5. Image Data Section (PackBits RLE Compressed Planar Channels)
-        // =====================================================================
-        write_psd_image_data(writer, width, height, &channels)
+        write_cmyk_psd_to_writer(writer, width, height, cmyk_pixels, icc_profile)
     })
 }
 
-/// Writes a flattened, simple RGB PSD file without any profile conversions.
-pub fn write_rgb_psd(width: u32, height: u32, rgba_pixels: &[u8], output_path: &str) -> Result<()> {
+/// Writes a flattened, simple RGB PSD stream without any profile conversions into any `Write` sink.
+pub fn write_rgb_psd_to_writer<W: Write>(
+    writer: &mut W,
+    width: u32,
+    height: u32,
+    rgba_pixels: &[u8],
+) -> Result<()> {
     let total_pixels = validate_psd_buffer(width, height, rgba_pixels)?;
 
     let mut channels = vec![vec![0u8; total_pixels]; 3];
@@ -333,38 +413,52 @@ pub fn write_rgb_psd(width: u32, height: u32, rgba_pixels: &[u8], output_path: &
         channels[2][i] = rgba_pixels[i * 4 + 2];
     }
 
+    // =====================================================================
+    // 1. File Header (26 bytes fixed-size)
+    // =====================================================================
+    writer.write_all(b"8BPS")?;
+    writer.write_all(&1u16.to_be_bytes())?;
+    writer.write_all(&[0; 6])?;
+    writer.write_all(&3u16.to_be_bytes())?;
+    writer.write_all(&height.to_be_bytes())?;
+    writer.write_all(&width.to_be_bytes())?;
+    writer.write_all(&8u16.to_be_bytes())?;
+    writer.write_all(&3u16.to_be_bytes())?;
+
+    // =====================================================================
+    // 2. Color Mode Data Section
+    // =====================================================================
+    writer.write_all(&0u32.to_be_bytes())?;
+
+    // =====================================================================
+    // 3. Image Resources Section
+    // =====================================================================
+    writer.write_all(&0u32.to_be_bytes())?;
+
+    // =====================================================================
+    // 4. Layer and Mask Information Section
+    // =====================================================================
+    writer.write_all(&0u32.to_be_bytes())?;
+
+    // =====================================================================
+    // 5. Image Data Section (PackBits RLE Compressed Planar Channels)
+    // =====================================================================
+    write_psd_image_data(writer, width, height, &channels)
+}
+
+/// Encodes a flattened RGB PSD into an in-memory `Vec<u8>`.
+#[allow(dead_code)]
+pub fn encode_rgb_psd_bytes(width: u32, height: u32, rgba_pixels: &[u8]) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    write_rgb_psd_to_writer(&mut buf, width, height, rgba_pixels)?;
+    Ok(buf)
+}
+
+/// Writes a flattened, simple RGB PSD file without any profile conversions.
+pub fn write_rgb_psd(width: u32, height: u32, rgba_pixels: &[u8], output_path: &str) -> Result<()> {
+    validate_psd_buffer(width, height, rgba_pixels)?;
     write_file_atomically(output_path, |writer| {
-        // =====================================================================
-        // 1. File Header (26 bytes fixed-size)
-        // =====================================================================
-        writer.write_all(b"8BPS")?;
-        writer.write_all(&1u16.to_be_bytes())?;
-        writer.write_all(&[0; 6])?;
-        writer.write_all(&3u16.to_be_bytes())?;
-        writer.write_all(&height.to_be_bytes())?;
-        writer.write_all(&width.to_be_bytes())?;
-        writer.write_all(&8u16.to_be_bytes())?;
-        writer.write_all(&3u16.to_be_bytes())?;
-
-        // =====================================================================
-        // 2. Color Mode Data Section
-        // =====================================================================
-        writer.write_all(&0u32.to_be_bytes())?;
-
-        // =====================================================================
-        // 3. Image Resources Section
-        // =====================================================================
-        writer.write_all(&0u32.to_be_bytes())?;
-
-        // =====================================================================
-        // 4. Layer and Mask Information Section
-        // =====================================================================
-        writer.write_all(&0u32.to_be_bytes())?;
-
-        // =====================================================================
-        // 5. Image Data Section (PackBits RLE Compressed Planar Channels)
-        // =====================================================================
-        write_psd_image_data(writer, width, height, &channels)
+        write_rgb_psd_to_writer(writer, width, height, rgba_pixels)
     })
 }
 
